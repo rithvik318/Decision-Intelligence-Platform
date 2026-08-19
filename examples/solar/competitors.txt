@@ -1,0 +1,11 @@
+Synthetic competitor notes for the Solar Market Analysis workspace.
+
+Helios Energie GmbH operates in the residential rooftop segment and depends on
+a single inverter supplier. Its installer network covers Bavaria and
+Baden-Wuerttemberg only.
+
+Nordlicht Solar focuses on commercial rooftop and has an in-house EPC team.
+Nordlicht Solar depends on imported modules and is exposed to tariff changes.
+
+Weser PV is a utility-scale developer. Weser PV competes with Nordlicht Solar
+for grid connection capacity in northern Germany.
