@@ -6,10 +6,11 @@ ingests heterogeneous documents into a persistent knowledge layer and answers
 questions against that evidence through a stateful LangGraph agent behind
 FastAPI.
 
-**Status: Phase 1.** The foundation is in place: workspaces, source-agnostic
-ingestion, Cognee-backed knowledge + memory, and a small LangGraph Q&A flow.
-The structured decision model (decisions, evidence, claims, assumptions, risks,
-alternatives, contradiction detection, reassessment) is *not* implemented yet.
+**Status: Phase 2.** On top of the Phase 1 foundation (workspaces,
+source-agnostic ingestion, Cognee knowledge + memory, LangGraph Q&A) the system
+now produces structured, evidence-backed decisions, remembers them, and can
+reassess them against new knowledge. Contradiction detection and external
+research tools are not implemented.
 
 ## Architecture
 
@@ -117,6 +118,7 @@ Health check: `GET http://localhost:8000/health`
 | POST | `/workspaces` | Create a workspace |
 | GET | `/workspaces` | List workspaces |
 | POST | `/workspaces/{workspace_id}/ingest` | Ingest documents / files / a GitHub repo |
+| POST | `/workspaces/{workspace_id}/graph` | Run LLM graph enrichment over ingested data |
 | POST | `/workspaces/{workspace_id}/chat` | Ask a question against workspace knowledge |
 
 ```bash
@@ -161,6 +163,48 @@ Every document preserves `source`, `file_name`, `document_type`, `location`
 (path/URL) and `timestamp` where available; provenance is also embedded in the
 text sent to Cognee so it survives into the graph.
 
+## Ingestion cost: chunk indexing vs graph enrichment
+
+Cognee's default `cognify` pipeline is four tasks, and only one of them calls
+the LLM:
+
+| Task | LLM calls |
+| --- | --- |
+| `classify_documents` | none |
+| `extract_chunks_from_documents` | none |
+| `extract_graph_and_summarize` | **2 per chunk** (entity/relationship extraction + summary), all chunks concurrently |
+| `add_data_points` | none (embeddings only, FastEmbed runs locally) |
+
+So graph enrichment is the entire LLM cost of ingestion, and on a free-tier
+model it dominates wall-clock time. Ingestion therefore runs only the three
+LLM-free tasks by default, through Cognee's supported `run_custom_pipeline`
+entry point. `add_data_points` embeds `DocumentChunk.text`, so semantic
+retrieval (`SearchType.CHUNKS`) works the moment ingest returns.
+
+Graph enrichment is opt-in, either per request or per deployment:
+
+```bash
+# fast path (default): seconds, no LLM calls
+curl -X POST .../workspaces/solar-market-analysis/ingest \
+  -H "Content-Type: application/json" -d '{"paths":["./examples/solar"]}'
+
+# with graph enrichment
+curl -X POST .../workspaces/solar-market-analysis/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"paths":["./examples/solar"],"build_graph":true}'
+
+# or later, over data already ingested
+curl -X POST .../workspaces/solar-market-analysis/graph
+```
+
+`COGNEE_BUILD_GRAPH_ON_INGEST=true` makes enrichment the default.
+`COGNEE_CHUNKS_PER_BATCH` (default 4) caps how many chunks are enriched
+concurrently — Cognee's own default is 2000, which fires every chunk at once
+and gets a free-tier model rate-limited.
+
+Until a workspace has been enriched, graph retrieval returns little and
+answers rest on semantic and memory retrieval. Nothing else changes.
+
 ## Workspaces
 
 A workspace has `workspace_id` (slug), `name`, `description`, `created_at`, and
@@ -175,11 +219,91 @@ pytest
 pytest --cov=app --cov-report=term-missing
 ```
 
-17 deterministic tests, no network and no API key: LLM provider resolution,
-workspace creation and
+38 deterministic tests, no network and no API key: decision models, the full
+decision graph over fakes, evidence/claims/alternatives, decision persistence
+and reassessment, structured-output validation and retry, the decision
+endpoints, LLM provider resolution, workspace creation and
 persistence, ingestion, workspace-scoped retrieval, memory persist/recall,
 LangGraph execution including the bounded retry, all four endpoints, file
 loading with provenance, and Cognee-adapter call translation against a stub.
+
+## Phase 2 — decision intelligence
+
+Phase 1 answers *what does the workspace know?*. Phase 2 answers *given that
+evidence and our previous decisions, what should we do, why, on what
+assumptions, at what risk, and what else did we consider?*
+
+A decision analysis is a LangGraph workflow, one node per stage:
+
+```text
+START
+  -> understand_decision            classify the question; detect reassessment
+  -> retrieve_context               WorkspaceRetriever: semantic + graph + memory
+       |  thin context? -> refine_retrieval -> retrieve_context   (once, bounded)
+  -> retrieve_previous_decisions    prior decisions for this workspace
+  -> extract_evidence               LLM, structured
+  -> generate_claims                LLM, structured
+  -> identify_assumptions_and_risks LLM, structured
+  -> evaluate_alternatives          LLM, structured
+  -> generate_recommendation        LLM, structured
+  -> persist_decision               structured store + Cognee memory
+  -> respond
+END
+```
+
+State is typed (`DecisionState`) and carries only structured objects — no
+reasoning traces. Every LLM stage asks for JSON matching a Pydantic schema and
+validates the reply; an invalid reply gets one corrective retry and then fails
+the request with 502 rather than inventing a decision.
+
+### Decision memory and reassessment
+
+`store_decision` / `load_decisions` on `KnowledgeService` write to **both**
+memory layers:
+
+- **Cognee** receives a readable summary via `remember()`, so past decisions are
+  retrievable semantically alongside the documents.
+- **`decisions.json`** under the data directory holds the lossless structured
+  record. Cognee's recall is LLM-mediated and does not round-trip a schema
+  reliably; reassessment needs the exact prior object. Same file-based approach
+  as `workspaces.json` — no new database.
+
+Ask a question containing a reassessment marker ("reassess", "revisit", "still
+valid", "previous decision", ...) and the workflow feeds the prior decisions
+into the recommendation stage, records what changed in
+`changed_since_previous`, sets `status: reassessed`, and links `supersedes` to
+the decision it revisits. A fresh question never sees prior decisions, so it is
+not anchored to an earlier conclusion.
+
+### Decision API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/workspaces/{workspace_id}/decisions` | Run a decision analysis |
+| GET | `/workspaces/{workspace_id}/decisions` | List previous decisions (recent first) |
+
+```bash
+curl -X POST http://localhost:8000/workspaces/solar-market-analysis/decisions \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"demo-1","question":"Should we prioritise residential or commercial solar projects?"}'
+```
+
+The response is a `Decision`: `decision_id`, `question`, `status`,
+`created_at`, `recommendation` (statement / rationale / confidence),
+`evidence[]` (id, statement, source, relevance), `claims[]` (each citing
+evidence ids), `assumptions[]`, `risks[]` (severity, rationale),
+`alternatives[]` (advantages, disadvantages, evidence), `sources[]`, plus
+`supersedes` and `changed_since_previous` on a reassessment.
+
+```bash
+# later, after ingesting new material
+curl -X POST http://localhost:8000/workspaces/solar-market-analysis/decisions \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"demo-1","question":"Reassess our previous decision using current project knowledge."}'
+```
+
+Uses the same OpenRouter/OpenAI provider configuration as the rest of the app.
+`LLM_TIMEOUT_SECONDS` (default 180) bounds each analysis stage.
 
 ## Known limitations
 
@@ -188,10 +312,7 @@ loading with provenance, and Cognee-adapter call translation against a stub.
 - The LangGraph checkpointer is process-local; durable memory lives in Cognee.
 - Real Cognee/OpenAI runs need credentials and are not part of the unit suite.
 
-## Phase 2 (not started)
+## Next
 
-Introduce the structured decision state — `Decision`, `Evidence`, `Claim`,
-`Assumption`, `Risk`, `Alternative` — persisted through Cognee, and extend the
-LangGraph graph into the decision lifecycle (intake → retrieve → recall → gap
-analysis → research → claim extraction → contradiction check → comparison →
-recommendation → persistence).
+Contradiction detection between new evidence and recorded claims, external
+research tools, and automatic detection of decisions that need revisiting.

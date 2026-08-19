@@ -23,6 +23,7 @@ class IngestionService:
         paths: list[Path] | None = None,
         documents: list[SourceDocument] | None = None,
         github_repository: str | None = None,
+        build_graph: bool | None = None,
     ) -> IngestResult:
         collected = list(documents or [])
         for path in paths or []:
@@ -37,4 +38,6 @@ class IngestionService:
             raise ValueError(
                 "Provide at least one path, inline document, or GitHub repository"
             )
-        return await self._knowledge.ingest(workspace_id, collected)
+        return await self._knowledge.ingest(
+            workspace_id, collected, build_graph=build_graph
+        )

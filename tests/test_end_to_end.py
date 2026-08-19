@@ -80,3 +80,31 @@ def test_unknown_workspace_is_rejected(container) -> None:
             ).status_code
             == 404
         )
+
+
+def test_ingest_is_llm_free_by_default_and_graph_is_opt_in(
+    container, fake_knowledge
+) -> None:
+    """Graph enrichment is the metered half of Cognee's pipeline: opt-in."""
+    app = create_app(container)
+    document = {"content": "Grid capacity is constrained.", "file_name": "a.md"}
+
+    with TestClient(app) as client:
+        client.post("/workspaces", json={"name": "Solar"})
+
+        default = client.post("/workspaces/solar/ingest", json={"documents": [document]})
+        assert default.json()["graph_built"] is False
+        assert fake_knowledge.graphs_built == []
+
+        opted_in = client.post(
+            "/workspaces/solar/ingest",
+            json={"documents": [document], "build_graph": True},
+        )
+        assert opted_in.json()["graph_built"] is True
+        assert fake_knowledge.graphs_built == ["solar"]
+
+        # and it can be run later over already-ingested data
+        later = client.post("/workspaces/solar/graph")
+        assert later.status_code == 202
+        assert later.json()["status"] == "graph_built"
+        assert fake_knowledge.graphs_built == ["solar", "solar"]

@@ -34,6 +34,22 @@ class Settings:
     cognee_timeout_seconds: float = field(
         default_factory=lambda: float(os.getenv("COGNEE_TIMEOUT_SECONDS", "900"))
     )
+    # Upper bound on a single LLM completion during decision analysis.
+    llm_timeout_seconds: float = field(
+        default_factory=lambda: float(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
+    )
+    # Graph enrichment is the only LLM-bound part of ingestion (two calls per
+    # chunk). Off by default so an upload is fast and free; request it per
+    # ingest, or flip this to make it the default.
+    build_graph_on_ingest: bool = field(
+        default_factory=lambda: os.getenv("COGNEE_BUILD_GRAPH_ON_INGEST", "").lower()
+        in {"1", "true", "yes"}
+    )
+    # How many chunks Cognee enriches concurrently. Cognee's default is 2000,
+    # which fires every chunk at once and gets a free-tier model rate-limited.
+    cognee_chunks_per_batch: int = field(
+        default_factory=lambda: int(os.getenv("COGNEE_CHUNKS_PER_BATCH", "4"))
+    )
     data_dir: Path = field(
         default_factory=lambda: Path(
             os.getenv("EDI_DATA_DIR", ".decision_intelligence")
@@ -43,6 +59,10 @@ class Settings:
     @property
     def workspace_store_path(self) -> Path:
         return self.data_dir / "workspaces.json"
+
+    @property
+    def decision_store_path(self) -> Path:
+        return self.data_dir / "decisions.json"
 
     # --- LLM provider boundary -------------------------------------------------
     # One place decides which provider the whole application talks to. Setting
@@ -96,6 +116,11 @@ class Settings:
         # "fastembed") to embed locally when no OpenAI quota is available.
         if self.openai_api_key:
             defaults["EMBEDDING_API_KEY"] = self.openai_api_key
+        # Free-tier models rate-limit aggressively; Cognee's own limiter costs
+        # nothing when the provider is generous and prevents a 429 storm when
+        # it is not.
+        defaults["LLM_RATE_LIMIT_ENABLED"] = "true"
+        defaults["CHUNKS_PER_BATCH"] = str(self.cognee_chunks_per_batch)
         for key, value in defaults.items():
             os.environ.setdefault(key, value)
 

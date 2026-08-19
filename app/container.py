@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from app.agent.generator import AnswerGenerator
 from app.agent.graph import WorkspaceAgent
 from app.config import Settings
+from app.decisions.analyst import DecisionAnalyst
+from app.decisions.graph import DecisionAgent
 from app.domain import KnowledgeService
 from app.ingestion.github import GitHubLoader
 from app.ingestion.service import IngestionService
@@ -22,6 +24,7 @@ class AppContainer:
     ingestion: IngestionService
     retriever: WorkspaceRetriever
     agent: WorkspaceAgent
+    decision_agent: DecisionAgent
 
 
 def build_container(
@@ -29,12 +32,14 @@ def build_container(
     *,
     knowledge: KnowledgeService | None = None,
     generator: AnswerGenerator | None = None,
+    analyst: DecisionAnalyst | None = None,
 ) -> AppContainer:
     if knowledge is None:
         from app.knowledge.cognee_service import CogneeKnowledgeService
 
         knowledge = CogneeKnowledgeService(settings)
     generator = generator or AnswerGenerator(settings)
+    analyst = analyst or DecisionAnalyst(settings)
     retriever = WorkspaceRetriever(knowledge)
     return AppContainer(
         settings=settings,
@@ -43,4 +48,5 @@ def build_container(
         ingestion=IngestionService(knowledge, GitHubLoader(settings)),
         retriever=retriever,
         agent=WorkspaceAgent(retriever, knowledge, generator),
+        decision_agent=DecisionAgent(retriever, knowledge, analyst),
     )

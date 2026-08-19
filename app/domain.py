@@ -78,6 +78,7 @@ class IngestResult:
     workspace_id: str
     documents_ingested: int
     dataset: str
+    graph_built: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,8 +118,16 @@ class KnowledgeService(Protocol):
     """
 
     async def ingest(
-        self, workspace_id: str, documents: list[SourceDocument]
+        self,
+        workspace_id: str,
+        documents: list[SourceDocument],
+        *,
+        build_graph: bool | None = None,
     ) -> IngestResult: ...
+
+    async def build_graph(self, workspace_id: str) -> None:
+        """Run LLM graph enrichment over everything already ingested."""
+        ...
 
     async def semantic_search(
         self, workspace_id: str, query: str, *, limit: int = 6
@@ -135,3 +144,13 @@ class KnowledgeService(Protocol):
     async def recall(
         self, workspace_id: str, session_id: str, query: str, *, limit: int = 4
     ) -> list[RetrievedItem]: ...
+
+    # Decision memory. Typed as Any to keep app.decisions out of this module's
+    # imports; implementations take and return app.decisions.models.Decision.
+    async def store_decision(
+        self, workspace_id: str, session_id: str, decision: Any
+    ) -> None: ...
+
+    async def load_decisions(
+        self, workspace_id: str, *, limit: int = 5
+    ) -> list[Any]: ...

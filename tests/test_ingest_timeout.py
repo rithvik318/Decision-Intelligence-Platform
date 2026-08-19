@@ -14,7 +14,7 @@ from app.main import create_app
 class StalledKnowledge:
     """Cognee adapter whose bound has fired (see CogneeKnowledgeService._call)."""
 
-    async def ingest(self, workspace_id, documents):
+    async def ingest(self, workspace_id, documents, *, build_graph=None):
         raise TimeoutError("cognee.cognify did not return")
 
 

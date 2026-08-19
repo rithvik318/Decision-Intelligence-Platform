@@ -5,7 +5,7 @@ import pytest
 from app.config import Settings
 from app.container import build_container
 from app.domain import SourceDocument
-from tests.fakes import EchoGenerator, InMemoryKnowledgeFake
+from tests.fakes import EchoGenerator, FakeDecisionAnalyst, InMemoryKnowledgeFake
 
 
 @pytest.fixture
@@ -26,9 +26,14 @@ def generator() -> EchoGenerator:
 
 
 @pytest.fixture
-def container(settings, fake_knowledge, generator):
+def analyst() -> FakeDecisionAnalyst:
+    return FakeDecisionAnalyst()
+
+
+@pytest.fixture
+def container(settings, fake_knowledge, generator, analyst):
     return build_container(
-        settings, knowledge=fake_knowledge, generator=generator
+        settings, knowledge=fake_knowledge, generator=generator, analyst=analyst
     )
 
 
