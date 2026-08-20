@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from app.api.models import (
     ChatRequest,
@@ -20,7 +21,24 @@ from app.config import get_settings
 from app.container import AppContainer, build_container
 from app.decisions.analyst import DecisionAnalysisError
 from app.decisions.models import Decision
-from app.domain import SourceDocument
+from app.domain import LLMRateLimitError, SourceDocument
+
+
+class UTF8JSONResponse(JSONResponse):
+    """JSON responses that declare their encoding.
+
+    Starlette already emits UTF-8 bytes but labels them `application/json`
+    with no charset, so clients that fall back to latin-1 (Windows PowerShell
+    5.1's Invoke-RestMethod among them) render en dashes and curly quotes as
+    mojibake. Naming the charset fixes it at the boundary that omitted it.
+    """
+
+    media_type = "application/json; charset=utf-8"
+
+
+def _rate_limited(exc: LLMRateLimitError) -> HTTPException:
+    headers = {"Retry-After": exc.retry_after} if exc.retry_after else None
+    return HTTPException(status_code=429, detail=str(exc), headers=headers)
 
 
 def create_app(container: AppContainer | None = None) -> FastAPI:
@@ -33,6 +51,7 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         title="Evidence-Driven Decision Intelligence Platform",
         version="0.2.0",
         lifespan=lifespan,
+        default_response_class=UTF8JSONResponse,
     )
 
     def _workspace(request: Request, workspace_id: str):
@@ -129,6 +148,8 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except LLMRateLimitError as exc:
+            raise _rate_limited(exc) from exc
         return ChatResponse(
             answer=result.answer,
             sources=list(result.sources),
@@ -154,6 +175,8 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except LLMRateLimitError as exc:
+            raise _rate_limited(exc) from exc
         except DecisionAnalysisError as exc:
             # A failed LLM stage must surface, never yield a fabricated decision.
             raise HTTPException(status_code=502, detail=str(exc)) from exc

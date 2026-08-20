@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.config import Settings
+from app.decisions.analyst import raise_if_rate_limited
 from app.domain import RetrievalContext
 
 SYSTEM_PROMPT = (
@@ -48,19 +49,23 @@ class AnswerGenerator:
     ) -> GeneratedAnswer:
         client = self._get_client()
         # Chat Completions is the surface both OpenAI and OpenRouter implement.
-        response = await client.chat.completions.create(
-            model=self._settings.llm_model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Question: {question}\n\n"
-                        f"Retrieved context:\n{context.as_prompt_block()}"
-                    ),
-                },
-            ],
-        )
+        try:
+            response = await client.chat.completions.create(
+                model=self._settings.llm_model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Question: {question}\n\n"
+                            f"Retrieved context:\n{context.as_prompt_block()}"
+                        ),
+                    },
+                ],
+            )
+        except Exception as exc:
+            raise_if_rate_limited(exc, "chat")
+            raise
         text = (response.choices[0].message.content or "").strip()
         needs_more = text.startswith(INSUFFICIENT)
         if needs_more:

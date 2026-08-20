@@ -14,6 +14,14 @@ from typing import Any, Protocol, runtime_checkable
 DocumentType = str
 
 
+class LLMRateLimitError(RuntimeError):
+    """The LLM provider returned 429. Carries Retry-After when the provider sent one."""
+
+    def __init__(self, message: str, retry_after: str | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 def utcnow() -> datetime:
     return datetime.now(UTC)
 

@@ -23,7 +23,7 @@ from app.decisions.models import (
     RecommendationResult,
     RiskAssessment,
 )
-from app.domain import RetrievalContext
+from app.domain import LLMRateLimitError, RetrievalContext
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,9 @@ class DecisionAnalyst:
             raise DecisionAnalysisError(
                 f"{stage} timed out after {self._settings.llm_timeout_seconds}s"
             ) from exc
+        except Exception as exc:
+            raise_if_rate_limited(exc, stage)
+            raise
         return response.choices[0].message.content or ""
 
     # --- analysis stages ----------------------------------------------------
@@ -183,6 +186,25 @@ class DecisionAnalyst:
             "sentences grounded in the evidence, not a reasoning transcript.",
             RecommendationResult,
         )
+
+
+def raise_if_rate_limited(exc: Exception, stage: str) -> None:
+    """Re-raise a provider 429 as LLMRateLimitError; leave anything else alone.
+
+    Imported lazily so `openai` stays an import-time-optional detail, matching
+    how the client itself is constructed.
+    """
+    from openai import RateLimitError
+
+    if not isinstance(exc, RateLimitError):
+        return
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    raise LLMRateLimitError(
+        f"The LLM provider rate-limited this request during {stage}. "
+        "Wait for the provider quota to reset and retry.",
+        retry_after=headers.get("retry-after"),
+    ) from exc
 
 
 def _strip_fences(content: str) -> str:
