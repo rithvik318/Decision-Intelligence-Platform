@@ -13,6 +13,7 @@ from app.api.models import (
     DecisionRequest,
     IngestRequest,
     IngestResponse,
+    ReassessmentRequest,
     RetrievalMetadata,
     WorkspaceRequest,
     WorkspaceResponse,
@@ -20,7 +21,10 @@ from app.api.models import (
 from app.config import get_settings
 from app.container import AppContainer, build_container
 from app.decisions.analyst import DecisionAnalysisError
+from app.decisions.comparison import DecisionComparison, compare_decisions
 from app.decisions.models import Decision
+from app.decisions.provenance import DecisionProvenance, build_provenance
+from app.decisions.validation import ValidationResult, validate_decision
 from app.domain import LLMRateLimitError, SourceDocument
 
 
@@ -59,6 +63,20 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             return request.app.state.container.workspaces.get(workspace_id)
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    async def _decision(request: Request, workspace_id: str, decision_id: str):
+        """Load a decision or 404. A decision owned by another workspace is
+        indistinguishable from one that does not exist."""
+        workspace = _workspace(request, workspace_id)
+        decision = await request.app.state.container.knowledge.get_decision(
+            workspace.workspace_id, decision_id
+        )
+        if decision is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"decision '{decision_id}' does not exist in this workspace",
+            )
+        return workspace, decision
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -193,6 +211,81 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         return await request.app.state.container.knowledge.load_decisions(
             workspace.workspace_id, limit=limit
         )
+
+    @app.get(
+        "/workspaces/{workspace_id}/decisions/{decision_id}", response_model=Decision
+    )
+    async def get_decision(
+        workspace_id: str, decision_id: str, request: Request
+    ) -> Decision:
+        _, decision = await _decision(request, workspace_id, decision_id)
+        return decision
+
+    @app.post(
+        "/workspaces/{workspace_id}/decisions/{decision_id}/reassess",
+        response_model=Decision,
+        status_code=201,
+    )
+    async def reassess_decision(
+        workspace_id: str,
+        decision_id: str,
+        payload: ReassessmentRequest,
+        request: Request,
+    ) -> Decision:
+        """Revisit one decision. The route stays thin: it resolves the target
+        and hands it to the existing DecisionAgent, which owns the workflow."""
+        workspace, previous = await _decision(request, workspace_id, decision_id)
+        try:
+            return await request.app.state.container.decision_agent.run(
+                payload.question,
+                workspace.workspace_id,
+                payload.session_id,
+                reassess_decision_id=previous.decision_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except LLMRateLimitError as exc:
+            raise _rate_limited(exc) from exc
+        except DecisionAnalysisError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=504, detail="Decision analysis timed out"
+            ) from exc
+
+    @app.get(
+        "/workspaces/{workspace_id}/decisions/{decision_id}/compare/{other_decision_id}",
+        response_model=DecisionComparison,
+    )
+    async def compare(
+        workspace_id: str, decision_id: str, other_decision_id: str, request: Request
+    ) -> DecisionComparison:
+        _, left = await _decision(request, workspace_id, decision_id)
+        _, right = await _decision(request, workspace_id, other_decision_id)
+        return compare_decisions(left, right)
+
+    @app.get(
+        "/workspaces/{workspace_id}/decisions/{decision_id}/provenance",
+        response_model=DecisionProvenance,
+    )
+    async def provenance(
+        workspace_id: str, decision_id: str, request: Request
+    ) -> DecisionProvenance:
+        _, decision = await _decision(request, workspace_id, decision_id)
+        return build_provenance(decision)
+
+    @app.get(
+        "/workspaces/{workspace_id}/decisions/{decision_id}/validation",
+        response_model=ValidationResult,
+    )
+    async def validation(
+        workspace_id: str, decision_id: str, request: Request
+    ) -> ValidationResult:
+        workspace, decision = await _decision(request, workspace_id, decision_id)
+        known = await request.app.state.container.knowledge.known_decision_ids(
+            workspace.workspace_id
+        )
+        return validate_decision(decision, known_decision_ids=known)
 
     return app
 

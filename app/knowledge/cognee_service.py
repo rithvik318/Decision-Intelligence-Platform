@@ -204,6 +204,14 @@ class CogneeKnowledgeService:
     ) -> list[Decision]:
         return self._decisions.list_for_workspace(workspace_id, limit=limit)
 
+    async def get_decision(
+        self, workspace_id: str, decision_id: str
+    ) -> Decision | None:
+        return self._decisions.get(workspace_id, decision_id)
+
+    async def known_decision_ids(self, workspace_id: str) -> set[str]:
+        return self._decisions.known_ids(workspace_id)
+
     @classmethod
     def _normalize(cls, values: Any, retrieval_type: str) -> list[RetrievedItem]:
         if values is None:

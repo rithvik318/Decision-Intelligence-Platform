@@ -219,7 +219,8 @@ pytest
 pytest --cov=app --cov-report=term-missing
 ```
 
-38 deterministic tests, no network and no API key: decision models, the full
+74 deterministic tests, no network and no API key: decision history,
+comparison, provenance, validation and reassessment; decision models, the full
 decision graph over fakes, evidence/claims/alternatives, decision persistence
 and reassessment, structured-output validation and retry, the decision
 endpoints, LLM provider resolution, workspace creation and
@@ -280,7 +281,53 @@ not anchored to an earlier conclusion.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | POST | `/workspaces/{workspace_id}/decisions` | Run a decision analysis |
-| GET | `/workspaces/{workspace_id}/decisions` | List previous decisions (recent first) |
+| GET | `/workspaces/{workspace_id}/decisions` | Decision history, newest first |
+| GET | `/workspaces/{workspace_id}/decisions/{decision_id}` | One complete structured decision |
+| POST | `/workspaces/{workspace_id}/decisions/{decision_id}/reassess` | Revisit that decision against current knowledge |
+| GET | `/workspaces/{workspace_id}/decisions/{decision_id}/compare/{other_decision_id}` | Structured diff of two decisions |
+| GET | `/workspaces/{workspace_id}/decisions/{decision_id}/provenance` | Recommendation → claims → evidence → source |
+| GET | `/workspaces/{workspace_id}/decisions/{decision_id}/validation` | Deterministic structural check |
+
+Everything except `POST /decisions` and `.../reassess` is **deterministic**: no
+LLM call, no Cognee query, no embeddings. They read the persisted decision and
+compute an answer, so they are cheap enough to call freely.
+
+Every route is workspace-scoped. A decision belonging to another workspace is
+indistinguishable from one that does not exist — all of these return 404, and
+none of them reveal that the id is real.
+
+**Comparison** reports what moved between two decisions: recommendation,
+confidence, status, and added/removed evidence, claims, assumptions, risks and
+alternatives, plus whether the right decision supersedes the left. Evidence is
+matched on its statement rather than its `evidence_id`, because ids are
+assigned per analysis run (E1, E2, …) and mean nothing across decisions.
+
+**Provenance** walks the stored decision only. Each claim resolves to the
+evidence it cites and each evidence item to its source document. A claim citing
+an id the decision does not contain is reported under
+`unresolved_evidence_ids`, and evidence no claim cites appears under
+`uncited_evidence_ids` — nothing is inferred or invented to fill a gap.
+
+**Validation** is a structural checker, not an LLM judge. It asks whether a
+decision is well-formed and traceable: claims cite evidence that exists,
+evidence has an id and a statement, alternatives and risk rationales reference
+real evidence ids, and reassessment bookkeeping (`status`, `supersedes`,
+`changed_since_previous`) is self-consistent. Structural and provenance
+violations are `errors` and make the decision invalid; quality concerns such as
+missing sources, no alternatives or an absent rationale are `warnings` and do
+not.
+
+**Reassessment** is a thin route over the existing Phase 2 workflow. It
+resolves the target decision, then hands its id to `DecisionAgent`, which
+places it first among the previous decisions so the recommendation stage sees
+it and `supersedes` links to it. The Phase 2 wording heuristic still applies to
+plain `POST /decisions` calls; the endpoint just makes the intent explicit
+instead of inferred.
+
+```bash
+curl -X POST .../workspaces/solar-market-analysis/decisions/$ID/reassess \
+  -H "Content-Type: application/json" -d '{"session_id":"demo-1"}'
+```
 
 ```bash
 curl -X POST http://localhost:8000/workspaces/solar-market-analysis/decisions \

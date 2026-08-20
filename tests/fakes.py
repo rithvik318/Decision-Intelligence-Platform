@@ -136,6 +136,17 @@ class InMemoryKnowledgeFake:
     ) -> list[Decision]:
         return list(reversed(self.decisions.get(workspace_id, [])))[:limit]
 
+    async def get_decision(
+        self, workspace_id: str, decision_id: str
+    ) -> Decision | None:
+        for decision in self.decisions.get(workspace_id, []):
+            if decision.decision_id == decision_id:
+                return decision
+        return None
+
+    async def known_decision_ids(self, workspace_id: str) -> set[str]:
+        return {d.decision_id for d in self.decisions.get(workspace_id, [])}
+
 
 class FakeDecisionAnalyst:
     """Deterministic stand-in for the LLM: derives output from the context."""

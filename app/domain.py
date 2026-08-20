@@ -162,3 +162,9 @@ class KnowledgeService(Protocol):
     async def load_decisions(
         self, workspace_id: str, *, limit: int = 5
     ) -> list[Any]: ...
+
+    async def get_decision(self, workspace_id: str, decision_id: str) -> Any | None:
+        """One workspace-scoped decision, or None when absent or not owned."""
+        ...
+
+    async def known_decision_ids(self, workspace_id: str) -> set[str]: ...

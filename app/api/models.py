@@ -60,6 +60,14 @@ class DecisionRequest(BaseModel):
     session_id: str = "default"
 
 
+class ReassessmentRequest(BaseModel):
+    session_id: str = "default"
+    question: str = Field(
+        default="Reassess this decision using current workspace knowledge.",
+        min_length=1,
+    )
+
+
 class ChatResponse(BaseModel):
     answer: str
     sources: list[str]

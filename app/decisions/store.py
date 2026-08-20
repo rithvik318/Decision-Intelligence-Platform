@@ -10,10 +10,15 @@ so they participate in semantic and graph retrieval.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from app.decisions.models import Decision
+
+logger = logging.getLogger(__name__)
 
 
 class DecisionStore:
@@ -24,7 +29,32 @@ class DecisionStore:
     def _read_all(self) -> list[dict]:
         if not self._store_path.exists():
             return []
-        return json.loads(self._store_path.read_text(encoding="utf-8") or "[]")
+        try:
+            records = json.loads(self._store_path.read_text(encoding="utf-8") or "[]")
+        except json.JSONDecodeError:
+            logger.error("decision store at %s is not valid JSON", self._store_path)
+            return []
+        return records if isinstance(records, list) else []
+
+    def _decisions_for(self, workspace_id: str) -> list[Decision]:
+        """Parse a workspace's decisions, skipping records that no longer fit
+        the schema rather than failing every read because of one bad row."""
+        decisions: list[Decision] = []
+        for record in self._read_all():
+            if not isinstance(record, dict):
+                continue
+            if record.get("workspace_id") != workspace_id:
+                continue
+            try:
+                decisions.append(Decision.model_validate(record))
+            except ValidationError:
+                logger.warning(
+                    "skipping malformed decision record %r in workspace %s",
+                    record.get("decision_id"),
+                    workspace_id,
+                )
+        decisions.sort(key=lambda d: d.created_at, reverse=True)
+        return decisions
 
     def append(self, decision: Decision) -> None:
         with self._lock:
@@ -37,10 +67,15 @@ class DecisionStore:
 
     def list_for_workspace(self, workspace_id: str, limit: int = 10) -> list[Decision]:
         """Most recent first, scoped to one workspace."""
-        decisions = [
-            Decision.model_validate(record)
-            for record in self._read_all()
-            if record.get("workspace_id") == workspace_id
-        ]
-        decisions.sort(key=lambda d: d.created_at, reverse=True)
-        return decisions[:limit]
+        return self._decisions_for(workspace_id)[:limit]
+
+    def get(self, workspace_id: str, decision_id: str) -> Decision | None:
+        """One decision, or None when it is absent *or* owned by another
+        workspace — the caller cannot tell the two apart, which is the point."""
+        for decision in self._decisions_for(workspace_id):
+            if decision.decision_id == decision_id:
+                return decision
+        return None
+
+    def known_ids(self, workspace_id: str) -> set[str]:
+        return {d.decision_id for d in self._decisions_for(workspace_id)}

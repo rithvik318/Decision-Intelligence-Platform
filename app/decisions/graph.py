@@ -54,6 +54,7 @@ class DecisionState(TypedDict, total=False):
     session_id: str
     retrieval_query: str
     is_reassessment: bool
+    reassess_decision_id: str
     attempts: int
     context: RetrievalContext
     previous_decisions: list[Decision]
@@ -112,12 +113,22 @@ class DecisionAgent:
 
         self.graph = builder.compile(checkpointer=InMemorySaver())
 
-    async def run(self, question: str, workspace_id: str, session_id: str) -> Decision:
+    async def run(
+        self,
+        question: str,
+        workspace_id: str,
+        session_id: str,
+        reassess_decision_id: str | None = None,
+    ) -> Decision:
+        """Run the workflow. `reassess_decision_id` names the decision being
+        revisited, making a reassessment explicit instead of inferred from the
+        question wording."""
         state = await self.graph.ainvoke(
             {
                 "question": question,
                 "workspace_id": workspace_id,
                 "session_id": session_id,
+                "reassess_decision_id": reassess_decision_id or "",
                 "attempts": 0,
             },
             {"configurable": {"thread_id": f"decision:{workspace_id}:{session_id}"}},
@@ -131,10 +142,12 @@ class DecisionAgent:
         if not question:
             raise ValueError("question must not be empty")
         lowered = question.lower()
-        return {
-            "retrieval_query": question,
-            "is_reassessment": any(m in lowered for m in REASSESSMENT_MARKERS),
-        }
+        # An explicitly targeted decision settles it; otherwise fall back to the
+        # Phase 2 wording heuristic.
+        is_reassessment = bool(state.get("reassess_decision_id")) or any(
+            marker in lowered for marker in REASSESSMENT_MARKERS
+        )
+        return {"retrieval_query": question, "is_reassessment": is_reassessment}
 
     async def _retrieve_context(self, state: DecisionState) -> dict:
         context = await self._retriever.retrieve_context(
@@ -159,10 +172,28 @@ class DecisionAgent:
         }
 
     async def _retrieve_previous_decisions(self, state: DecisionState) -> dict:
-        previous = await self._knowledge.load_decisions(
-            state["workspace_id"], limit=PREVIOUS_DECISION_LIMIT
+        previous = list(
+            await self._knowledge.load_decisions(
+                state["workspace_id"], limit=PREVIOUS_DECISION_LIMIT
+            )
         )
-        return {"previous_decisions": list(previous)}
+        # When a specific decision is being reassessed it leads the list, so the
+        # existing persist step links `supersedes` to it rather than to whatever
+        # happens to be newest.
+        target_id = state.get("reassess_decision_id")
+        if target_id:
+            target = next(
+                (d for d in previous if d.decision_id == target_id), None
+            )
+            if target is None:
+                target = await self._knowledge.get_decision(
+                    state["workspace_id"], target_id
+                )
+            if target is not None:
+                previous = [target] + [
+                    d for d in previous if d.decision_id != target_id
+                ]
+        return {"previous_decisions": previous}
 
     async def _extract_evidence(self, state: DecisionState) -> dict:
         result = await self._analyst.extract_evidence(
