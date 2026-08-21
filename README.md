@@ -1,21 +1,68 @@
 # Evidence-Driven Decision Intelligence Platform
 
-An AI workspace for complex, evidence-driven decisions. A **workspace** is an
-information/decision domain ("Should we enter the German solar market?"). It
-ingests heterogeneous documents into a persistent knowledge layer and answers
-questions against that evidence through a stateful LangGraph agent behind
-FastAPI.
+An AI workspace for **complex, evidence-driven decisions**.
 
-**Status: Phase 4 — feature complete.** Workspaces, ingestion, semantic and
-graph retrieval, a LangGraph decision workflow producing structured
-evidence-backed decisions, decision history, provenance, structural validation,
-freshness tracking, targeted reassessment, comparison, and a React frontend that
-exercises all of it. Contradiction detection and external research tools are not
-implemented.
+The platform lets a user create an isolated decision workspace, ingest
+research and business documents, retrieve evidence through a persistent
+knowledge layer, ask questions, and run structured decision analyses.
+Decisions are stored with evidence, claims, assumptions, risks,
+alternatives, provenance, validation, freshness, comparison, and
+reassessment support.
 
-## Architecture
 
-```mermaid
+The project includes:
+
+-   Workspace isolation
+-   Document ingestion and provenance
+-   Semantic retrieval
+-   Optional knowledge-graph enrichment
+-   Stateful LangGraph decision analysis
+-   Structured evidence-backed recommendations
+-   Decision history and persistence
+-   Targeted reassessment
+-   Decision comparison
+-   Provenance tracing
+-   Deterministic structural validation
+-   Knowledge/decision freshness detection
+-   React + TypeScript frontend
+-   FastAPI backend
+-   Local embedded Cognee storage
+-   OpenRouter/OpenAI provider support
+-   Local FastEmbed embeddings
+-   Docker/Compose deployment
+-   CORS and ingestion-path hardening
+-   98 deterministic backend tests
+
+------------------------------------------------------------------------
+
+## 1. What problem does it solve?
+
+Normal RAG systems are good at answering:
+
+> **"What does my knowledge base say?"**
+
+This project extends that idea to:
+
+> **"Given the available evidence, what should I do, why, what are the
+> risks and alternatives, and has new information changed the
+> decision?"**
+
+A workspace represents one decision domain, for example:
+
+-   Should we enter the German solar market?
+-   Can an E-buggy be implemented in rural India?
+-   Should a company launch a new product?
+-   Which market should receive investment?
+-   Has newly published research invalidated an earlier conclusion?
+
+The system keeps the evidence and decisions scoped to the workspace so
+unrelated domains do not contaminate one another.
+
+------------------------------------------------------------------------
+
+# 2. Architecture
+
+``` mermaid
 flowchart TD
     U[Client] --> API[FastAPI]
     API --> WS[WorkspaceRegistry - JSON]
@@ -30,396 +77,1032 @@ flowchart TD
     LG --> O[OpenAI Responses API]
 ```
 
-The application owns source normalization, retrieval coordination, orchestration
-and HTTP schemas. Cognee owns embeddings, graph construction, retrieval and
-persistent memory. LangGraph owns state and execution.
+The application owns source normalization, retrieval coordination,
+orchestration and HTTP schemas.
 
-`KnowledgeService` (in `app/domain.py`) is the boundary the future decision
-agent codes against: `ingest`, `semantic_search`, `graph_search`, `remember`,
-`recall`. `CogneeKnowledgeService` is the only production implementation; tests
-use an in-memory fake.
+Cognee owns:
 
-Agent flow (Phase 1):
+-   embeddings
+-   graph construction
+-   retrieval
+-   persistent knowledge storage
+-   session memory
 
-```text
-understand -> retrieve -> reason -> (at most one refined retrieval)
-           -> respond -> update workspace/session memory
+LangGraph owns workflow state and execution.
+
+The `KnowledgeService` protocol in `app/domain.py` is the boundary
+between the application and knowledge layer. Production uses
+`CogneeKnowledgeService`; tests use in-memory fakes.
+
+------------------------------------------------------------------------
+
+# 3. High-level data flow
+
+``` text
+Documents
+   │
+   ▼
+IngestionService
+   │
+   ├── normalize source/provenance
+   ├── validate paths
+   └── send documents to Cognee
+          │
+          ├── embeddings/vector store
+          ├── optional graph enrichment
+          └── persistent knowledge
+                    │
+                    ▼
+             WorkspaceRetriever
+                    │
+          ┌─────────┼─────────┐
+          ▼         ▼         ▼
+      semantic    graph     memory
+       search     search     recall
+          └─────────┼─────────┘
+                    ▼
+              LangGraph Agent
+                    │
+                    ▼
+           Structured Decision
+                    │
+          ┌─────────┼────────────┐
+          ▼         ▼            ▼
+      decisions   Cognee     workspace
+        .json     memory      metadata
 ```
 
-Only the visible question and answer are written to memory — never model
-reasoning.
+Only structured application data and visible question/answer information
+are persisted. Model reasoning traces are not stored.
 
-## Setup
+------------------------------------------------------------------------
 
-Python 3.11 or 3.12.
+# 4. Decision-analysis workflow
 
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -e ".[dev,cognee]"
-cp .env.example .env
+A decision analysis is implemented as a typed LangGraph workflow:
+
+``` text
+START
+  -> understand_decision
+  -> retrieve_context
+       | thin context?
+       -> refine_retrieval
+       -> retrieve_context       (at most once)
+  -> retrieve_previous_decisions
+  -> extract_evidence
+  -> generate_claims
+  -> identify_assumptions_and_risks
+  -> evaluate_alternatives
+  -> generate_recommendation
+  -> persist_decision
+  -> respond
+END
 ```
 
-### LLM provider
+Each LLM stage requests structured output validated against Pydantic
+models.
 
-The provider boundary lives in `app/config.py`. Setting `OPENROUTER_API_KEY`
-selects OpenRouter for both the agent and Cognee; leaving it empty falls back to
-`OPENAI_API_KEY`. `OPENROUTER_MODEL` defaults to `openai/gpt-oss-20b:free`.
+If structured output is invalid, the workflow performs one corrective
+retry. If it still fails, the request fails rather than inventing a
+decision.
 
-OpenRouter is not one of Cognee's first-class providers, so the app maps it onto
-Cognee's generic adapter:
+The resulting decision contains:
 
-| Cognee env var | Value set by the app |
-| --- | --- |
-| `LLM_PROVIDER` | `custom` |
-| `LLM_MODEL` | `openrouter/openai/gpt-oss-20b:free` |
-| `LLM_ENDPOINT` | `https://openrouter.ai/api/v1` |
-| `LLM_API_KEY` | your `OPENROUTER_API_KEY` |
+-   recommendation
+-   rationale
+-   confidence
+-   evidence
+-   claims
+-   assumptions
+-   risks
+-   alternatives
+-   sources
+-   reassessment metadata
 
-Any of these set in the environment beforehand wins — the app only fills blanks.
+------------------------------------------------------------------------
 
-### Embeddings
+# 5. Reassessment
 
-Cognee configures embeddings separately from the LLM, and **OpenRouter has no
-embeddings endpoint**. Embeddings therefore stay on OpenAI by default and need
-an `OPENAI_API_KEY` with quota. To embed locally instead:
+A major feature is the ability to revisit an existing decision when new
+knowledge arrives.
 
-```bash
+Example:
+
+``` text
+Decision A
+    │
+    ├── documents available at T1
+    │
+    ▼
+New documents ingested at T2
+    │
+    ▼
+Freshness detection
+    │
+    ▼
+Decision A becomes stale
+    │
+    ▼
+Targeted reassessment
+    │
+    ▼
+Decision B
+    ├── supersedes Decision A
+    └── records what changed
+```
+
+The reassessment endpoint explicitly identifies the previous decision.
+The agent puts that decision first among previous decisions so the
+recommendation stage can evaluate it against current workspace
+knowledge.
+
+A normal new decision is not automatically anchored to an earlier
+decision.
+
+------------------------------------------------------------------------
+
+# 6. Decision intelligence features
+
+## Comparison
+
+Compares two persisted decisions and reports changes in:
+
+-   recommendation
+-   confidence
+-   status
+-   evidence
+-   claims
+-   assumptions
+-   risks
+-   alternatives
+-   supersession relationship
+
+Evidence is matched using its statement rather than its per-run ID
+because IDs such as `E1`, `E2`, etc. are local to an individual
+analysis.
+
+## Provenance
+
+Provenance follows:
+
+``` text
+Recommendation
+    ↓
+Claims
+    ↓
+Evidence
+    ↓
+Source document
+```
+
+It does not invent missing relationships.
+
+It explicitly reports:
+
+-   unresolved evidence IDs
+-   uncited evidence IDs
+
+## Validation
+
+Validation is deterministic and structural, not an LLM judge.
+
+It checks:
+
+-   claims reference existing evidence
+-   evidence contains required fields
+-   alternatives reference valid evidence
+-   risk rationales reference valid evidence
+-   reassessment metadata is consistent
+-   provenance relationships are structurally valid
+
+Structural problems are errors.
+
+Quality concerns such as missing alternatives or missing rationale are
+warnings.
+
+## Freshness
+
+Freshness compares:
+
+``` text
+decision.created_at
+        vs
+workspace.knowledge_updated_at
+```
+
+If knowledge was ingested after a decision was created, the decision can
+be marked stale.
+
+This check requires:
+
+-   no LLM call
+-   no retrieval
+-   no embeddings
+
+It is therefore cheap and deterministic.
+
+------------------------------------------------------------------------
+
+# 7. Ingestion
+
+The ingestion layer is source-agnostic.
+
+Supported sources include:
+
+-   local Markdown/text files
+-   text-readable PDFs
+-   directories
+-   inline documents
+-   bounded read-only GitHub ingestion
+
+Documents preserve metadata such as:
+
+-   source
+-   filename
+-   document type
+-   location
+-   timestamp
+
+Provenance is retained when content enters the knowledge layer.
+
+## Secure local ingestion
+
+Ingest paths are server-side paths. Every path is resolved and must
+remain below `INGEST_ROOT`.
+
+Examples outside the allowed root are rejected.
+
+This prevents a client from using the ingestion API to request arbitrary
+files from the server filesystem.
+
+The Docker configuration pins the ingestion root to the bundled examples
+directory by default.
+
+------------------------------------------------------------------------
+
+# 8. Cognee ingestion and graph enrichment
+
+Cognee's full enrichment pipeline can be expensive because graph
+extraction and summarization use the LLM.
+
+Therefore ingestion defaults to the fast indexing path.
+
+### Default ingestion
+
+``` text
+documents
+   ↓
+classification
+   ↓
+chunk extraction
+   ↓
+embeddings
+   ↓
+semantic retrieval available
+```
+
+No graph LLM enrichment is required.
+
+### Optional graph enrichment
+
+Graph construction can be requested per ingestion:
+
+``` json
+{
+  "paths": ["./examples/solar"],
+  "build_graph": true
+}
+```
+
+or triggered later through:
+
+``` text
+POST /workspaces/{workspace_id}/graph
+```
+
+The concurrency limit is configurable through `COGNEE_CHUNKS_PER_BATCH`
+and defaults to a conservative value suitable for free-tier models.
+
+------------------------------------------------------------------------
+
+# 9. Storage architecture
+
+The project intentionally does **not** require Postgres or Neo4j.
+
+Application state uses:
+
+``` text
+EDI_DATA_DIR/
+├── workspaces.json
+├── decisions.json
+├── data/
+└── system/
+```
+
+Cognee uses its embedded persistent stores for knowledge, graph,
+vectors, and memory.
+
+The decision store remains JSON because the project needs a lossless
+structured representation of previous decisions for comparison and
+reassessment. Cognee memory is complementary and optimized for retrieval
+rather than exact schema round-tripping.
+
+Writes to the application's JSON stores use an atomic temporary-file
+replacement strategy.
+
+For deployment, `/data` should be backed by persistent storage.
+
+------------------------------------------------------------------------
+
+# 10. LLM providers
+
+The provider boundary lives in `app/config.py`.
+
+OpenRouter is preferred when `OPENROUTER_API_KEY` is present. Otherwise
+the application can use OpenAI.
+
+Default OpenRouter model:
+
+``` text
+openai/gpt-oss-20b:free
+```
+
+For Cognee, OpenRouter is mapped through its generic/custom provider
+configuration:
+
+  Variable         Value
+  ---------------- --------------------------------------
+  `LLM_PROVIDER`   `custom`
+  `LLM_MODEL`      `openrouter/openai/gpt-oss-20b:free`
+  `LLM_ENDPOINT`   `https://openrouter.ai/api/v1`
+  `LLM_API_KEY`    OpenRouter API key
+
+Explicit environment variables take precedence over values derived by
+the application.
+
+------------------------------------------------------------------------
+
+# 11. Embeddings
+
+OpenRouter does not provide the embeddings endpoint used by this
+application.
+
+Two configurations are supported.
+
+### OpenAI embeddings
+
+Provide:
+
+``` text
+OPENAI_API_KEY=...
+```
+
+### Local FastEmbed
+
+Install:
+
+``` bash
 pip install -e ".[local-embeddings]"
 ```
 
-then set in `.env`:
+Then configure:
 
-```
+``` text
 EMBEDDING_PROVIDER=fastembed
 EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 EMBEDDING_DIMENSIONS=384
 ```
 
-Cognee uses local embedded storage under `EDI_DATA_DIR` (default
-`.decision_intelligence/`) — no Neo4j or other service is required. The embedded
-stores are single-process, so run one Uvicorn worker.
+The Docker image includes the local-embedding extra so the deployed
+container does not silently fall back to an unavailable embedding
+provider.
 
-`cognee` is an optional extra so the test suite installs and runs without it.
-Running the real API requires it.
+------------------------------------------------------------------------
 
-## Run
+# 12. Backend setup
 
-```bash
+## Requirements
+
+Recommended:
+
+-   Python 3.11+
+-   Node.js 20+
+-   npm
+-   Git
+
+For real Cognee execution, install the Cognee extra.
+
+### Windows
+
+``` powershell
+cd D:\projects\AI-KG-CV
+
+python -m venv .venv
+.venv\Scripts\activate
+
+pip install -e ".[dev,cognee,local-embeddings]"
+```
+
+### Linux/macOS
+
+``` bash
+python -m venv .venv
+source .venv/bin/activate
+
+pip install -e ".[dev,cognee,local-embeddings]"
+```
+
+Create environment configuration:
+
+``` bash
+cp .env.example .env
+```
+
+On PowerShell:
+
+``` powershell
+Copy-Item .env.example .env
+```
+
+Set the required API key:
+
+``` text
+OPENROUTER_API_KEY=your_key_here
+```
+
+Never commit `.env`.
+
+------------------------------------------------------------------------
+
+# 13. Run the backend
+
+Activate the virtual environment first.
+
+``` bash
 uvicorn app.main:app --reload --workers 1
 ```
 
-Health check: `GET http://localhost:8000/health`
+Backend:
 
-## API
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/health` | Liveness |
-| POST | `/workspaces` | Create a workspace |
-| GET | `/workspaces` | List workspaces |
-| GET | `/workspaces/{workspace_id}` | One workspace with its document list and graph state |
-| GET | `/workspaces/{workspace_id}/documents` | What the workspace holds, newest first |
-| GET | `/workspaces/{workspace_id}/freshness` | Which of this workspace's decisions new knowledge has outrun |
-| POST | `/workspaces/{workspace_id}/ingest` | Ingest documents / files / a GitHub repo |
-| POST | `/workspaces/{workspace_id}/graph` | Run LLM graph enrichment over ingested data |
-| POST | `/workspaces/{workspace_id}/chat` | Ask a question against workspace knowledge |
-
-```bash
-curl -X POST http://localhost:8000/workspaces \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Solar Market Analysis","description":"Should we enter the German solar market?"}'
-
-curl -X POST http://localhost:8000/workspaces/solar-market-analysis/ingest \
-  -H "Content-Type: application/json" \
-  -d '{"paths":["./examples/solar"]}'
-
-curl -X POST http://localhost:8000/workspaces/solar-market-analysis/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message":"Which competitors depend on a single supplier?","session_id":"review-1"}'
+``` text
+http://localhost:8000
 ```
 
-Response shape:
+Health check:
 
-```json
-{
-  "answer": "...",
-  "sources": ["competitors.txt"],
-  "retrieval": {"semantic_hits": 2, "graph_hits": 1, "memory_hits": 0}
-}
+``` text
+GET /health
 ```
 
-## CLI
+OpenAPI:
 
-```bash
-decision-intel create-workspace solar-market-analysis --name "Solar Market Analysis"
-decision-intel ingest solar-market-analysis --path ./examples/solar
-decision-intel ingest solar-market-analysis --github owner/repository
+``` text
+http://localhost:8000/docs
 ```
 
-## Ingestion
+The embedded Cognee stores are single-process, so use one Uvicorn
+worker.
 
-Source-agnostic. Supported today: inline documents, local Markdown/TXT/text-PDF
-files, whole directories, and a bounded read-only GitHub loader (metadata, tree,
-up to 30 relevant files). GitHub is one source among many, not the product.
+------------------------------------------------------------------------
 
-Every document preserves `source`, `file_name`, `document_type`, `location`
-(path/URL) and `timestamp` where available; provenance is also embedded in the
-text sent to Cognee so it survives into the graph.
+# 14. Frontend setup
 
-## Ingestion cost: chunk indexing vs graph enrichment
+The frontend is a React + TypeScript application built with Vite.
 
-Cognee's default `cognify` pipeline is four tasks, and only one of them calls
-the LLM:
-
-| Task | LLM calls |
-| --- | --- |
-| `classify_documents` | none |
-| `extract_chunks_from_documents` | none |
-| `extract_graph_and_summarize` | **2 per chunk** (entity/relationship extraction + summary), all chunks concurrently |
-| `add_data_points` | none (embeddings only, FastEmbed runs locally) |
-
-So graph enrichment is the entire LLM cost of ingestion, and on a free-tier
-model it dominates wall-clock time. Ingestion therefore runs only the three
-LLM-free tasks by default, through Cognee's supported `run_custom_pipeline`
-entry point. `add_data_points` embeds `DocumentChunk.text`, so semantic
-retrieval (`SearchType.CHUNKS`) works the moment ingest returns.
-
-Graph enrichment is opt-in, either per request or per deployment:
-
-```bash
-# fast path (default): seconds, no LLM calls
-curl -X POST .../workspaces/solar-market-analysis/ingest \
-  -H "Content-Type: application/json" -d '{"paths":["./examples/solar"]}'
-
-# with graph enrichment
-curl -X POST .../workspaces/solar-market-analysis/ingest \
-  -H "Content-Type: application/json" \
-  -d '{"paths":["./examples/solar"],"build_graph":true}'
-
-# or later, over data already ingested
-curl -X POST .../workspaces/solar-market-analysis/graph
-```
-
-`COGNEE_BUILD_GRAPH_ON_INGEST=true` makes enrichment the default.
-`COGNEE_CHUNKS_PER_BATCH` (default 4) caps how many chunks are enriched
-concurrently — Cognee's own default is 2000, which fires every chunk at once
-and gets a free-tier model rate-limited.
-
-Until a workspace has been enriched, graph retrieval returns little and
-answers rest on semantic and memory retrieval. Nothing else changes.
-
-## Workspaces
-
-A workspace has `workspace_id` (slug), `name`, `description`, `created_at`, and
-is persisted in a single JSON file under the data directory. Each workspace maps
-to a Cognee dataset `workspace-{slug}`; memory is scoped to
-`workspace:{id}:session:{session_id}`.
-
-## Tests
-
-```bash
-pytest
-pytest --cov=app --cov-report=term-missing
-```
-
-98 deterministic tests, no network and no API key: decision history,
-comparison, provenance, validation and reassessment; decision models, the full
-decision graph over fakes, evidence/claims/alternatives, decision persistence
-and reassessment, structured-output validation and retry, the decision
-endpoints, LLM provider resolution, workspace creation and
-persistence, ingestion, workspace-scoped retrieval, memory persist/recall,
-LangGraph execution including the bounded retry, all four endpoints, file
-loading with provenance, and Cognee-adapter call translation against a stub.
-
-## Phase 2 — decision intelligence
-
-Phase 1 answers *what does the workspace know?*. Phase 2 answers *given that
-evidence and our previous decisions, what should we do, why, on what
-assumptions, at what risk, and what else did we consider?*
-
-A decision analysis is a LangGraph workflow, one node per stage:
-
-```text
-START
-  -> understand_decision            classify the question; detect reassessment
-  -> retrieve_context               WorkspaceRetriever: semantic + graph + memory
-       |  thin context? -> refine_retrieval -> retrieve_context   (once, bounded)
-  -> retrieve_previous_decisions    prior decisions for this workspace
-  -> extract_evidence               LLM, structured
-  -> generate_claims                LLM, structured
-  -> identify_assumptions_and_risks LLM, structured
-  -> evaluate_alternatives          LLM, structured
-  -> generate_recommendation        LLM, structured
-  -> persist_decision               structured store + Cognee memory
-  -> respond
-END
-```
-
-State is typed (`DecisionState`) and carries only structured objects — no
-reasoning traces. Every LLM stage asks for JSON matching a Pydantic schema and
-validates the reply; an invalid reply gets one corrective retry and then fails
-the request with 502 rather than inventing a decision.
-
-### Decision memory and reassessment
-
-`store_decision` / `load_decisions` on `KnowledgeService` write to **both**
-memory layers:
-
-- **Cognee** receives a readable summary via `remember()`, so past decisions are
-  retrievable semantically alongside the documents.
-- **`decisions.json`** under the data directory holds the lossless structured
-  record. Cognee's recall is LLM-mediated and does not round-trip a schema
-  reliably; reassessment needs the exact prior object. Same file-based approach
-  as `workspaces.json` — no new database.
-
-Ask a question containing a reassessment marker ("reassess", "revisit", "still
-valid", "previous decision", ...) and the workflow feeds the prior decisions
-into the recommendation stage, records what changed in
-`changed_since_previous`, sets `status: reassessed`, and links `supersedes` to
-the decision it revisits. A fresh question never sees prior decisions, so it is
-not anchored to an earlier conclusion.
-
-### Decision API
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| POST | `/workspaces/{workspace_id}/decisions` | Run a decision analysis |
-| GET | `/workspaces/{workspace_id}/decisions` | Decision history, newest first |
-| GET | `/workspaces/{workspace_id}/decisions/{decision_id}` | One complete structured decision |
-| POST | `/workspaces/{workspace_id}/decisions/{decision_id}/reassess` | Revisit that decision against current knowledge |
-| GET | `/workspaces/{workspace_id}/decisions/{decision_id}/compare/{other_decision_id}` | Structured diff of two decisions |
-| GET | `/workspaces/{workspace_id}/decisions/{decision_id}/provenance` | Recommendation → claims → evidence → source |
-| GET | `/workspaces/{workspace_id}/decisions/{decision_id}/validation` | Deterministic structural check |
-| GET | `/workspaces/{workspace_id}/decisions/{decision_id}/freshness` | Whether newer knowledge has arrived since the decision |
-
-Everything except `POST /decisions` and `.../reassess` is **deterministic**: no
-LLM call, no Cognee query, no embeddings. They read the persisted decision and
-compute an answer, so they are cheap enough to call freely.
-
-Every route is workspace-scoped. A decision belonging to another workspace is
-indistinguishable from one that does not exist — all of these return 404, and
-none of them reveal that the id is real.
-
-**Comparison** reports what moved between two decisions: recommendation,
-confidence, status, and added/removed evidence, claims, assumptions, risks and
-alternatives, plus whether the right decision supersedes the left. Evidence is
-matched on its statement rather than its `evidence_id`, because ids are
-assigned per analysis run (E1, E2, …) and mean nothing across decisions.
-
-**Provenance** walks the stored decision only. Each claim resolves to the
-evidence it cites and each evidence item to its source document. A claim citing
-an id the decision does not contain is reported under
-`unresolved_evidence_ids`, and evidence no claim cites appears under
-`uncited_evidence_ids` — nothing is inferred or invented to fill a gap.
-
-**Validation** is a structural checker, not an LLM judge. It asks whether a
-decision is well-formed and traceable: claims cite evidence that exists,
-evidence has an id and a statement, alternatives and risk rationales reference
-real evidence ids, and reassessment bookkeeping (`status`, `supersedes`,
-`changed_since_previous`) is self-consistent. Structural and provenance
-violations are `errors` and make the decision invalid; quality concerns such as
-missing sources, no alternatives or an absent rationale are `warnings` and do
-not.
-
-**Reassessment** is a thin route over the existing Phase 2 workflow. It
-resolves the target decision, then hands its id to `DecisionAgent`, which
-places it first among the previous decisions so the recommendation stage sees
-it and `supersedes` links to it. The Phase 2 wording heuristic still applies to
-plain `POST /decisions` calls; the endpoint just makes the intent explicit
-instead of inferred.
-
-```bash
-curl -X POST .../workspaces/solar-market-analysis/decisions/$ID/reassess \
-  -H "Content-Type: application/json" -d '{"session_id":"demo-1"}'
-```
-
-```bash
-curl -X POST http://localhost:8000/workspaces/solar-market-analysis/decisions \
-  -H "Content-Type: application/json" \
-  -d '{"session_id":"demo-1","question":"Should we prioritise residential or commercial solar projects?"}'
-```
-
-The response is a `Decision`: `decision_id`, `question`, `status`,
-`created_at`, `recommendation` (statement / rationale / confidence),
-`evidence[]` (id, statement, source, relevance), `claims[]` (each citing
-evidence ids), `assumptions[]`, `risks[]` (severity, rationale),
-`alternatives[]` (advantages, disadvantages, evidence), `sources[]`, plus
-`supersedes` and `changed_since_previous` on a reassessment.
-
-```bash
-# later, after ingesting new material
-curl -X POST http://localhost:8000/workspaces/solar-market-analysis/decisions \
-  -H "Content-Type: application/json" \
-  -d '{"session_id":"demo-1","question":"Reassess our previous decision using current project knowledge."}'
-```
-
-Uses the same OpenRouter/OpenAI provider configuration as the rest of the app.
-`LLM_TIMEOUT_SECONDS` (default 180) bounds each analysis stage.
-
-## Frontend
-
-A React + TypeScript app under `web/`, built with Vite. Five screens cover the
-whole product: workspaces, workspace knowledge (documents, ingestion, graph
-enrichment), knowledge chat, decision analysis, decision history and detail
-(provenance, validation, freshness, reassess), and comparison. It talks to the
-API and holds no decision logic of its own — no mock data, no local state store.
-
-```bash
+``` bash
 cd web
 npm install
-cp .env.example .env        # VITE_API_BASE_URL=http://localhost:8000
-npm run dev                 # http://localhost:5173
-npm run build               # typecheck + production build into web/dist
 ```
 
-When `web/dist` exists, the API mounts it at `/` and serves the UI from its own
-origin — which is what the Docker image does, so no CORS is involved in
-production. In split local development the Vite server on `:5173` calls the API
-on `:8000`, which is why `CORS_ALLOW_ORIGINS` defaults to the Vite origins.
+Create:
 
-## Decision freshness
+``` text
+web/.env
+```
 
-Ingestion records what a workspace holds and when, so
-`GET /…/decisions/{id}/freshness` can say whether documents arrived after a
-decision was made. It is a timestamp comparison — no LLM call, no retrieval —
-and the UI shows it as a banner on every decision with a prompt to reassess.
+with:
 
-## Security
+``` text
+VITE_API_BASE_URL=http://localhost:8000
+```
 
-- **Ingestion is confined.** `paths` on the ingest request names files the
-  *server* reads. Every path is resolved and must sit below `INGEST_ROOT`;
-  anything else is a 400. Narrow this in deployment — the compose file sets it
-  to `/app/examples`.
-- **CORS is explicit.** `CORS_ALLOW_ORIGINS` is a comma-separated allowlist and
-  is never `*`.
-- **Secrets come from the environment.** `.env` is gitignored; the image
-  contains no keys; the frontend bundle contains no keys.
-- **There is no authentication.** Workspaces isolate data from each other, not
-  from people. Run this on localhost or behind your own auth layer.
+Run development mode:
 
-## Deployment
+``` bash
+npm run dev
+```
 
-```bash
-cp .env.example .env        # set OPENROUTER_API_KEY
+The Vite server normally starts at:
+
+``` text
+http://localhost:5173
+```
+
+Production build:
+
+``` bash
+npm run build
+```
+
+This performs:
+
+``` text
+TypeScript check
+      +
+Vite production build
+```
+
+When `web/dist` exists, FastAPI can serve the frontend from the same
+origin.
+
+------------------------------------------------------------------------
+
+# 15. Frontend capabilities
+
+The UI provides the complete product flow:
+
+### Workspaces
+
+-   create workspace
+-   list workspaces
+-   open a workspace
+
+### Workspace knowledge
+
+-   view documents
+-   ingest knowledge
+-   view graph state
+-   inspect freshness
+
+### Knowledge chat
+
+Ask questions against workspace knowledge and see retrieval
+metadata/source information.
+
+### Decision analysis
+
+Submit a decision question and generate a structured evidence-backed
+decision.
+
+### Decision history
+
+Review previous decisions and their status.
+
+### Decision detail
+
+Inspect:
+
+-   recommendation
+-   confidence
+-   evidence
+-   claims
+-   assumptions
+-   risks
+-   alternatives
+-   provenance
+-   validation
+-   freshness
+
+### Reassessment
+
+Re-run a selected decision against current workspace knowledge.
+
+### Comparison
+
+Compare two decisions and identify what changed.
+
+The frontend contains no decision logic of its own. It is an API client
+and presentation layer.
+
+------------------------------------------------------------------------
+
+# 16. API
+
+## Workspace API
+
+  Method   Endpoint                                 Purpose
+  -------- ---------------------------------------- ------------------------
+  GET      `/health`                                Liveness
+  POST     `/workspaces`                            Create workspace
+  GET      `/workspaces`                            List workspaces
+  GET      `/workspaces/{workspace_id}`             Workspace details
+  GET      `/workspaces/{workspace_id}/documents`   Workspace documents
+  GET      `/workspaces/{workspace_id}/freshness`   Workspace freshness
+  POST     `/workspaces/{workspace_id}/ingest`      Ingest knowledge
+  POST     `/workspaces/{workspace_id}/graph`       Build graph enrichment
+  POST     `/workspaces/{workspace_id}/chat`        Knowledge chat
+
+## Decision API
+
+  ----------------------------------------------------------------------------------------------------------------------------------
+  Method                  Endpoint                                                                           Purpose
+  ----------------------- ---------------------------------------------------------------------------------- -----------------------
+  POST                    `/workspaces/{workspace_id}/decisions`                                             Run decision analysis
+
+  GET                     `/workspaces/{workspace_id}/decisions`                                             Decision history
+
+  GET                     `/workspaces/{workspace_id}/decisions/{decision_id}`                               Retrieve decision
+
+  POST                    `/workspaces/{workspace_id}/decisions/{decision_id}/reassess`                      Reassess decision
+
+  GET                     `/workspaces/{workspace_id}/decisions/{decision_id}/compare/{other_decision_id}`   Compare decisions
+
+  GET                     `/workspaces/{workspace_id}/decisions/{decision_id}/provenance`                    Decision provenance
+
+  GET                     `/workspaces/{workspace_id}/decisions/{decision_id}/validation`                    Structural validation
+
+  GET                     `/workspaces/{workspace_id}/decisions/{decision_id}/freshness`                     Decision freshness
+  ----------------------------------------------------------------------------------------------------------------------------------
+
+All decision routes are workspace-scoped.
+
+A decision belonging to another workspace is intentionally returned as
+`404`, preventing cross-workspace ID disclosure.
+
+------------------------------------------------------------------------
+
+# 17. Example API workflow
+
+Create a workspace:
+
+``` bash
+curl -X POST http://localhost:8000/workspaces \
+  -H "Content-Type: application/json" \
+  -d '{"name":"E-buggy Market Analysis","description":"Can this be implemented in rural India?"}'
+```
+
+Ingest documents:
+
+``` bash
+curl -X POST http://localhost:8000/workspaces/e-buggy-market-analysis/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"paths":["./examples/ebuggy"]}'
+```
+
+Ask a knowledge question:
+
+``` bash
+curl -X POST http://localhost:8000/workspaces/e-buggy-market-analysis/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"What are the major barriers to rural deployment?","session_id":"demo-1"}'
+```
+
+Run a decision:
+
+``` bash
+curl -X POST http://localhost:8000/workspaces/e-buggy-market-analysis/decisions \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"demo-1","question":"Can this be implemented in rural India?"}'
+```
+
+After new information is ingested, check freshness and reassess the
+decision.
+
+------------------------------------------------------------------------
+
+# 18. Security and reliability
+
+### Path confinement
+
+Local ingestion is restricted to `INGEST_ROOT`.
+
+### CORS
+
+CORS uses an explicit allowlist:
+
+``` text
+CORS_ALLOW_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+```
+
+The application does not use wildcard `*` CORS.
+
+### Secrets
+
+Secrets are loaded from environment variables.
+
+The following must never be committed:
+
+``` text
+.env
+API keys
+local Cognee databases
+decision data
+frontend build artifacts
+node_modules
+```
+
+### Rate limits
+
+Provider rate-limit exceptions are translated into HTTP `429` responses.
+
+When a provider supplies `Retry-After`, it is forwarded to the client.
+
+### Timeouts
+
+LLM and Cognee operations have configurable timeout boundaries.
+
+------------------------------------------------------------------------
+
+# 19. Docker deployment
+
+The project includes:
+
+``` text
+Dockerfile
+docker-compose.yml
+.dockerignore
+```
+
+Build and start:
+
+``` bash
 docker compose up --build
 ```
 
-The image builds the frontend, installs `.[cognee,local-embeddings]` so
-FastEmbed is present (without it Cognee silently falls back to OpenAI
-embeddings), serves the UI and API together on port 8000, and mounts a named
-volume at `/data` for `decisions.json`, `workspaces.json` and Cognee's stores.
-**Without that volume every decision and the whole knowledge base is lost on
-restart.** One worker only — Cognee's embedded stores are single-process.
+The container:
 
-## Known limitations
+1.  builds the React frontend
+2.  installs backend dependencies
+3.  includes local embeddings
+4.  starts FastAPI
+5.  serves the React application
+6.  exposes port `8000`
+7.  mounts persistent application/Cognee data
 
-- Scanned PDFs need OCR and are rejected when no text can be extracted.
-- Embedded Cognee storage suits a single-process local/demo deployment.
-- The LangGraph checkpointer is process-local; durable memory lives in Cognee.
-- Real Cognee/OpenAI runs need credentials and are not part of the unit suite.
+Open:
 
-## Next
+``` text
+http://localhost:8000
+```
 
-Contradiction detection between new evidence and recorded claims, external
-research tools, and automatic detection of decisions that need revisiting.
+Health:
+
+``` text
+http://localhost:8000/health
+```
+
+The deployment uses one worker because the embedded Cognee stores are
+designed for single-process operation.
+
+For any persistent deployment, `/data` must use persistent storage.
+Otherwise application decisions and embedded knowledge can disappear
+when the container is recreated.
+
+------------------------------------------------------------------------
+
+# 20. Production deployment considerations
+
+The Docker configuration is suitable for a small demo or controlled
+deployment.
+
+Before exposing it to untrusted users, add:
+
+-   authentication
+-   authorization
+-   HTTPS
+-   rate limiting
+-   production secret management
+-   stronger request-size limits
+-   persistent storage
+-   monitoring/log aggregation
+-   backups
+
+The current workspace isolation is an **application-level data
+boundary**, not a complete authentication/security boundary.
+
+Without authentication, users who can reach the API are not prevented
+from accessing workspace IDs they know.
+
+------------------------------------------------------------------------
+
+# 21. Testing
+
+The backend test suite is deterministic and does not require live
+LLM/Cognee calls.
+
+Run:
+
+``` bash
+pytest -q
+```
+
+Current verified result:
+
+``` text
+98 passed
+```
+
+Additional checks:
+
+``` bash
+ruff check .
+pip check
+python -m compileall app
+```
+
+Frontend:
+
+``` bash
+cd web
+npm run build
+```
+
+The production frontend build performs TypeScript validation before Vite
+bundling.
+
+The integration smoke testing performed during Phase 4 covered:
+
+-   health
+-   frontend serving
+-   CORS
+-   workspace creation
+-   workspace retrieval
+-   ingestion
+-   ingestion path security
+-   document listing
+-   graph state
+-   decision history
+-   decision retrieval
+-   provenance
+-   validation
+-   comparison
+-   freshness
+-   UTF-8 responses
+-   workspace isolation
+-   LLM error mapping
+
+------------------------------------------------------------------------
+
+# 22. Project structure
+
+``` text
+AI-KG-CV/
+│
+├── app/
+│   ├── agent/              # LangGraph agent and answer generation
+│   ├── api/                # Pydantic API models
+│   ├── decisions/          # Decision analysis, storage, validation,
+│   │                        # comparison, provenance, freshness
+│   ├── ingestion/          # Source loading and path validation
+│   ├── knowledge/          # Cognee integration
+│   ├── workspaces/         # Workspace lifecycle/persistence
+│   ├── config.py           # Environment/provider configuration
+│   ├── container.py        # Application dependency wiring
+│   ├── domain.py           # Domain models/protocol boundaries
+│   └── main.py             # FastAPI application and routes
+│
+├── tests/
+│   ├── fakes.py
+│   └── ...
+│
+├── web/
+│   ├── src/
+│   │   ├── components/
+│   │   ├── pages/
+│   │   ├── api.ts
+│   │   ├── hooks.ts
+│   │   ├── types.ts
+│   │   └── App.tsx
+│   ├── package.json
+│   └── vite.config.ts
+│
+├── examples/
+│   └── solar/
+│
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example
+├── README.md
+└── pyproject.toml
+```
+
+------------------------------------------------------------------------
+
+# 23. Design decisions
+
+### Why LangGraph?
+
+The decision process is naturally represented as explicit stateful
+stages. LangGraph provides controlled execution, typed state, bounded
+refinement and clear workflow boundaries.
+
+### Why Cognee?
+
+Cognee provides the knowledge-layer primitives needed for semantic
+retrieval, graph retrieval and persistent memory without requiring a
+separate vector database and graph database for this project.
+
+### Why JSON for decisions?
+
+Decision records are relatively small and read-mostly. Exact structured
+records are more reliable for comparison and reassessment than trying to
+reconstruct a Pydantic decision from LLM-mediated memory.
+
+### Why no Postgres?
+
+The current workload and architecture do not require a relational
+database. Introducing Postgres would add operational complexity without
+replacing Cognee's embedded knowledge stores.
+
+### Why graph enrichment is optional?
+
+Graph enrichment is LLM-intensive. Semantic chunk retrieval already
+provides useful knowledge access, while graph enrichment can be enabled
+when relationship-heavy reasoning is valuable.
+
+------------------------------------------------------------------------
+
+# 24. Current limitations
+
+The project is feature-complete, but it is intentionally not a
+large-scale production SaaS platform.
+
+Current limitations include:
+
+-   no built-in authentication
+-   single-process embedded Cognee deployment
+-   synchronous ingestion/decision requests
+-   scanned PDFs require OCR/text extraction
+-   no automated contradiction detection
+-   no external research/search agent
+-   no production CI/CD pipeline
+-   GitHub ingestion is bounded and read-only
+-   model confidence is the model's judgement, not a calibrated
+    probability
+-   failed analysis stages do not resume from a durable workflow
+    checkpoint
+
+These are product-scale limitations, not unfinished Phase 4
+functionality.
+
+------------------------------------------------------------------------
+
+# 25. Future extensions
+
+Potential future work includes:
+
+1.  Contradiction detection between new evidence and existing claims
+2.  External research/search connectors
+3.  Authentication and role-based workspace access
+4.  Background job execution for long-running analysis
+5.  Production relational metadata storage
+6.  CI/CD and automated deployment
+7.  Observability and usage/cost tracking
+8.  Decision approval workflows
+9.  Evidence quality scoring
+10. Automated alerts when important decisions become stale
+
+These should be treated as future product evolution rather than
+requirements for the current release.
+
+------------------------------------------------------------------------
+
+# 26. Recommended demo flow
+
+For a clean demonstration:
+
+``` text
+1. Create workspace
+        ↓
+2. Upload/ingest research
+        ↓
+3. Inspect documents
+        ↓
+4. Ask knowledge questions
+        ↓
+5. Run a decision
+        ↓
+6. Inspect recommendation + evidence + risks
+        ↓
+7. Open provenance + validation
+        ↓
+8. Add new knowledge
+        ↓
+9. Check freshness
+        ↓
+10. Reassess
+        ↓
+11. Compare old vs new decision
+```
+
+A useful non-solar example is:
+
+> **Workspace:** E-buggy Market Analysis\
+> **Decision:** Can this be implemented in rural India?
+
+This demonstrates that the system is domain-independent rather than
+being tied to the bundled solar example.
+
+------------------------------------------------------------------------
+
+# 27. License / project status
+
+This repository is an implementation of an evidence-driven decision
+intelligence platform built around FastAPI, LangGraph, Cognee,
+React/TypeScript and OpenAI-compatible LLM providers.
+
+**Release status: Phase 4 complete.**
+
+The current release should be considered a working local/demo deployment
+and a foundation for a production deployment with authentication,
+persistent infrastructure, monitoring and CI/CD added as required.
