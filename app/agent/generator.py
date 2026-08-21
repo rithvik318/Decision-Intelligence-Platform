@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.config import Settings
-from app.decisions.analyst import raise_if_rate_limited
+from app.decisions.analyst import (
+    DecisionAnalysisError,
+    raise_as_provider_failure,
+    raise_if_rate_limited,
+)
 from app.domain import RetrievalContext
 
 SYSTEM_PROMPT = (
@@ -34,7 +38,8 @@ class AnswerGenerator:
             from openai import AsyncOpenAI
 
             if not self._settings.llm_api_key:
-                raise RuntimeError(
+                # Same error type the decision routes use, so both map to 502.
+                raise DecisionAnalysisError(
                     "No LLM credentials: set OPENROUTER_API_KEY or OPENAI_API_KEY"
                 )
             # OpenRouter is OpenAI-compatible, so only the base URL differs.
@@ -65,6 +70,7 @@ class AnswerGenerator:
             )
         except Exception as exc:
             raise_if_rate_limited(exc, "chat")
+            raise_as_provider_failure(exc, "chat")
             raise
         text = (response.choices[0].message.content or "").strip()
         needs_more = text.startswith(INSUFFICIENT)

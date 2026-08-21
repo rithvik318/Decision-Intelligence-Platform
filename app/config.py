@@ -35,6 +35,21 @@ class Settings:
         default_factory=lambda: float(os.getenv("COGNEE_TIMEOUT_SECONDS", "900"))
     )
     # Upper bound on a single LLM completion during decision analysis.
+    # Ingestion may only read below this directory. Defaults to the working
+    # directory so the bundled examples keep working; narrow it in deployment.
+    ingest_root: Path = field(
+        default_factory=lambda: Path(os.getenv("INGEST_ROOT", ".")).resolve()
+    )
+    # Browser origins allowed to call the API. Never "*".
+    cors_allow_origins: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            origin.strip()
+            for origin in os.getenv(
+                "CORS_ALLOW_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+            ).split(",")
+            if origin.strip()
+        )
+    )
     llm_timeout_seconds: float = field(
         default_factory=lambda: float(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
     )

@@ -22,11 +22,28 @@ class WorkspaceRequest(BaseModel):
     workspace_id: str | None = None
 
 
+class IngestedDocumentResponse(BaseModel):
+    file_name: str
+    source: str
+    document_type: str
+    location: str | None = None
+    ingested_at: datetime
+
+
 class WorkspaceResponse(BaseModel):
     workspace_id: str
     name: str
     description: str
     created_at: datetime
+    documents: list[IngestedDocumentResponse] = Field(default_factory=list)
+    document_count: int = 0
+    graph_built: bool = False
+    knowledge_updated_at: datetime | None = None
+
+    @classmethod
+    def of(cls, workspace) -> WorkspaceResponse:
+        data = workspace.to_dict()
+        return cls(**data, document_count=len(data["documents"]))
 
 
 class IngestRequest(BaseModel):

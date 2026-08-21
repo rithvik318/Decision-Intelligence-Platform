@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from app.domain import IngestResult, KnowledgeService, SourceDocument
 from app.ingestion.files import load_directory, load_file
 from app.ingestion.github import GitHubLoader
+from app.ingestion.paths import resolve_within
 
 
 class IngestionService:
     """Source-agnostic ingestion into a workspace's knowledge layer."""
 
     def __init__(
-        self, knowledge: KnowledgeService, github_loader: GitHubLoader
+        self,
+        knowledge: KnowledgeService,
+        github_loader: GitHubLoader,
+        ingest_root: Path,
     ) -> None:
         self._knowledge = knowledge
         self._github_loader = github_loader
+        self._ingest_root = ingest_root
 
     async def ingest(
         self,
@@ -26,8 +32,9 @@ class IngestionService:
         build_graph: bool | None = None,
     ) -> IngestResult:
         collected = list(documents or [])
-        for path in paths or []:
-            path = Path(path)
+        for requested in paths or []:
+            # Confine server-side reads before touching the filesystem.
+            path = resolve_within(requested, self._ingest_root)
             if path.is_dir():
                 collected.extend(load_directory(path))
             else:
@@ -38,6 +45,7 @@ class IngestionService:
             raise ValueError(
                 "Provide at least one path, inline document, or GitHub repository"
             )
-        return await self._knowledge.ingest(
+        result = await self._knowledge.ingest(
             workspace_id, collected, build_graph=build_graph
         )
+        return replace(result, documents=tuple(collected))

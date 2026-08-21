@@ -79,6 +79,25 @@ def validate_decision(
                 )
             )
 
+    # Attribution must match what retrieval actually produced. Skipped when the
+    # decision records no sources, since there is then nothing to check against.
+    if decision.sources:
+        known_sources = set(decision.sources)
+        for evidence in decision.evidence:
+            source = (evidence.source or "").strip()
+            if source and source not in known_sources:
+                errors.append(
+                    ValidationIssue(
+                        code="EVIDENCE_SOURCE_UNKNOWN",
+                        message=(
+                            f"Evidence {evidence.evidence_id} is attributed to "
+                            f"'{source}', which is not among the sources this "
+                            "decision retrieved."
+                        ),
+                        subject=evidence.evidence_id,
+                    )
+                )
+
     # D. A recommendation must be present and say something.
     if not decision.recommendation.statement.strip():
         errors.append(

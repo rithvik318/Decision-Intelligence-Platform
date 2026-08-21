@@ -5,12 +5,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.models import (
     ChatRequest,
     ChatResponse,
     DecisionRequest,
+    IngestedDocumentResponse,
     IngestRequest,
     IngestResponse,
     ReassessmentRequest,
@@ -22,10 +25,20 @@ from app.config import get_settings
 from app.container import AppContainer, build_container
 from app.decisions.analyst import DecisionAnalysisError
 from app.decisions.comparison import DecisionComparison, compare_decisions
+from app.decisions.freshness import (
+    DecisionFreshness,
+    WorkspaceFreshness,
+    assess_freshness,
+    assess_workspace_freshness,
+)
 from app.decisions.models import Decision
 from app.decisions.provenance import DecisionProvenance, build_provenance
 from app.decisions.validation import ValidationResult, validate_decision
 from app.domain import LLMRateLimitError, SourceDocument
+from app.ingestion.paths import UnsafeIngestPath
+
+# How many recent decisions the workspace freshness summary considers.
+WORKSPACE_FRESHNESS_DECISION_LIMIT = 50
 
 
 class UTF8JSONResponse(JSONResponse):
@@ -78,6 +91,15 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             )
         return workspace, decision
 
+    settings = container.settings if container else get_settings()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(settings.cors_allow_origins),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
+    )
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -92,14 +114,45 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return WorkspaceResponse(**workspace.to_dict())
+        return WorkspaceResponse.of(workspace)
 
     @app.get("/workspaces", response_model=list[WorkspaceResponse])
     async def list_workspaces(request: Request) -> list[WorkspaceResponse]:
         return [
-            WorkspaceResponse(**w.to_dict())
+            WorkspaceResponse.of(w)
             for w in request.app.state.container.workspaces.list()
         ]
+
+    @app.get("/workspaces/{workspace_id}", response_model=WorkspaceResponse)
+    async def get_workspace(workspace_id: str, request: Request) -> WorkspaceResponse:
+        return WorkspaceResponse.of(_workspace(request, workspace_id))
+
+    @app.get(
+        "/workspaces/{workspace_id}/documents",
+        response_model=list[IngestedDocumentResponse],
+    )
+    async def list_documents(
+        workspace_id: str, request: Request
+    ) -> list[IngestedDocumentResponse]:
+        """What this workspace holds, newest first."""
+        workspace = _workspace(request, workspace_id)
+        documents = sorted(
+            workspace.documents, key=lambda d: d.ingested_at, reverse=True
+        )
+        return [IngestedDocumentResponse(**d.to_dict()) for d in documents]
+
+    @app.get(
+        "/workspaces/{workspace_id}/freshness", response_model=WorkspaceFreshness
+    )
+    async def workspace_freshness(
+        workspace_id: str, request: Request
+    ) -> WorkspaceFreshness:
+        """Which of this workspace's decisions new knowledge has outrun."""
+        workspace = _workspace(request, workspace_id)
+        decisions = await request.app.state.container.knowledge.load_decisions(
+            workspace.workspace_id, limit=WORKSPACE_FRESHNESS_DECISION_LIMIT
+        )
+        return assess_workspace_freshness(workspace, list(decisions))
 
     @app.post(
         "/workspaces/{workspace_id}/ingest",
@@ -119,6 +172,8 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
                 github_repository=payload.github_repository,
                 build_graph=payload.build_graph,
             )
+        except UnsafeIngestPath as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except TimeoutError as exc:
@@ -129,6 +184,13 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
                     "pipeline may have completed; check the server log."
                 ),
             ) from exc
+        # Record what was ingested — including documents loaded from paths or
+        # GitHub, which the request body never names.
+        request.app.state.container.workspaces.record_ingestion(
+            workspace.workspace_id,
+            list(result.documents),
+            graph_built=result.graph_built,
+        )
         return IngestResponse(
             workspace_id=result.workspace_id,
             documents_ingested=result.documents_ingested,
@@ -153,6 +215,9 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
                 status_code=504,
                 detail="Graph enrichment did not finish within COGNEE_TIMEOUT_SECONDS.",
             ) from exc
+        request.app.state.container.workspaces.record_graph_built(
+            workspace.workspace_id
+        )
         return {"workspace_id": workspace.workspace_id, "status": "graph_built"}
 
     @app.post("/workspaces/{workspace_id}/chat", response_model=ChatResponse)
@@ -168,6 +233,12 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except LLMRateLimitError as exc:
             raise _rate_limited(exc) from exc
+        except DecisionAnalysisError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=504, detail="The model did not respond in time"
+            ) from exc
         return ChatResponse(
             answer=result.answer,
             sources=list(result.sources),
@@ -286,6 +357,23 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             workspace.workspace_id
         )
         return validate_decision(decision, known_decision_ids=known)
+
+    @app.get(
+        "/workspaces/{workspace_id}/decisions/{decision_id}/freshness",
+        response_model=DecisionFreshness,
+    )
+    async def freshness(
+        workspace_id: str, decision_id: str, request: Request
+    ) -> DecisionFreshness:
+        workspace, decision = await _decision(request, workspace_id, decision_id)
+        return assess_freshness(decision, workspace)
+
+    # Serve the built frontend from the same origin when it is present, so a
+    # single container needs no CORS and no second service. Mounted last so it
+    # never shadows an API route.
+    dist = Path(__file__).resolve().parent.parent / "web" / "dist"
+    if dist.is_dir():
+        app.mount("/", StaticFiles(directory=dist, html=True), name="web")
 
     return app
 

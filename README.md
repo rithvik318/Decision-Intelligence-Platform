@@ -6,11 +6,12 @@ ingests heterogeneous documents into a persistent knowledge layer and answers
 questions against that evidence through a stateful LangGraph agent behind
 FastAPI.
 
-**Status: Phase 2.** On top of the Phase 1 foundation (workspaces,
-source-agnostic ingestion, Cognee knowledge + memory, LangGraph Q&A) the system
-now produces structured, evidence-backed decisions, remembers them, and can
-reassess them against new knowledge. Contradiction detection and external
-research tools are not implemented.
+**Status: Phase 4 — feature complete.** Workspaces, ingestion, semantic and
+graph retrieval, a LangGraph decision workflow producing structured
+evidence-backed decisions, decision history, provenance, structural validation,
+freshness tracking, targeted reassessment, comparison, and a React frontend that
+exercises all of it. Contradiction detection and external research tools are not
+implemented.
 
 ## Architecture
 
@@ -117,6 +118,9 @@ Health check: `GET http://localhost:8000/health`
 | GET | `/health` | Liveness |
 | POST | `/workspaces` | Create a workspace |
 | GET | `/workspaces` | List workspaces |
+| GET | `/workspaces/{workspace_id}` | One workspace with its document list and graph state |
+| GET | `/workspaces/{workspace_id}/documents` | What the workspace holds, newest first |
+| GET | `/workspaces/{workspace_id}/freshness` | Which of this workspace's decisions new knowledge has outrun |
 | POST | `/workspaces/{workspace_id}/ingest` | Ingest documents / files / a GitHub repo |
 | POST | `/workspaces/{workspace_id}/graph` | Run LLM graph enrichment over ingested data |
 | POST | `/workspaces/{workspace_id}/chat` | Ask a question against workspace knowledge |
@@ -219,7 +223,7 @@ pytest
 pytest --cov=app --cov-report=term-missing
 ```
 
-74 deterministic tests, no network and no API key: decision history,
+98 deterministic tests, no network and no API key: decision history,
 comparison, provenance, validation and reassessment; decision models, the full
 decision graph over fakes, evidence/claims/alternatives, decision persistence
 and reassessment, structured-output validation and retry, the decision
@@ -287,6 +291,7 @@ not anchored to an earlier conclusion.
 | GET | `/workspaces/{workspace_id}/decisions/{decision_id}/compare/{other_decision_id}` | Structured diff of two decisions |
 | GET | `/workspaces/{workspace_id}/decisions/{decision_id}/provenance` | Recommendation → claims → evidence → source |
 | GET | `/workspaces/{workspace_id}/decisions/{decision_id}/validation` | Deterministic structural check |
+| GET | `/workspaces/{workspace_id}/decisions/{decision_id}/freshness` | Whether newer knowledge has arrived since the decision |
 
 Everything except `POST /decisions` and `.../reassess` is **deterministic**: no
 LLM call, no Cognee query, no embeddings. They read the persisted decision and
@@ -351,6 +356,61 @@ curl -X POST http://localhost:8000/workspaces/solar-market-analysis/decisions \
 
 Uses the same OpenRouter/OpenAI provider configuration as the rest of the app.
 `LLM_TIMEOUT_SECONDS` (default 180) bounds each analysis stage.
+
+## Frontend
+
+A React + TypeScript app under `web/`, built with Vite. Five screens cover the
+whole product: workspaces, workspace knowledge (documents, ingestion, graph
+enrichment), knowledge chat, decision analysis, decision history and detail
+(provenance, validation, freshness, reassess), and comparison. It talks to the
+API and holds no decision logic of its own — no mock data, no local state store.
+
+```bash
+cd web
+npm install
+cp .env.example .env        # VITE_API_BASE_URL=http://localhost:8000
+npm run dev                 # http://localhost:5173
+npm run build               # typecheck + production build into web/dist
+```
+
+When `web/dist` exists, the API mounts it at `/` and serves the UI from its own
+origin — which is what the Docker image does, so no CORS is involved in
+production. In split local development the Vite server on `:5173` calls the API
+on `:8000`, which is why `CORS_ALLOW_ORIGINS` defaults to the Vite origins.
+
+## Decision freshness
+
+Ingestion records what a workspace holds and when, so
+`GET /…/decisions/{id}/freshness` can say whether documents arrived after a
+decision was made. It is a timestamp comparison — no LLM call, no retrieval —
+and the UI shows it as a banner on every decision with a prompt to reassess.
+
+## Security
+
+- **Ingestion is confined.** `paths` on the ingest request names files the
+  *server* reads. Every path is resolved and must sit below `INGEST_ROOT`;
+  anything else is a 400. Narrow this in deployment — the compose file sets it
+  to `/app/examples`.
+- **CORS is explicit.** `CORS_ALLOW_ORIGINS` is a comma-separated allowlist and
+  is never `*`.
+- **Secrets come from the environment.** `.env` is gitignored; the image
+  contains no keys; the frontend bundle contains no keys.
+- **There is no authentication.** Workspaces isolate data from each other, not
+  from people. Run this on localhost or behind your own auth layer.
+
+## Deployment
+
+```bash
+cp .env.example .env        # set OPENROUTER_API_KEY
+docker compose up --build
+```
+
+The image builds the frontend, installs `.[cognee,local-embeddings]` so
+FastEmbed is present (without it Cognee silently falls back to OpenAI
+embeddings), serves the UI and API together on port 8000, and mounts a named
+volume at `/data` for `decisions.json`, `workspaces.json` and Cognee's stores.
+**Without that volume every decision and the whole knowledge base is lost on
+restart.** One worker only — Cognee's embedded stores are single-process.
 
 ## Known limitations
 

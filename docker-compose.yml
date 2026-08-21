@@ -1,0 +1,22 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Secrets come from the environment, never from the image.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in .env}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-oss-20b:free}
+      EDI_DATA_DIR: /data
+      INGEST_ROOT: /app/examples
+      EMBEDDING_PROVIDER: fastembed
+      EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
+      EMBEDDING_DIMENSIONS: "384"
+      # The frontend is served from this same origin, so no cross-origin call
+      # is made in the container. Widen only if you host the UI separately.
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:8000}
+    volumes:
+      - decision-data:/data
+
+volumes:
+  decision-data:

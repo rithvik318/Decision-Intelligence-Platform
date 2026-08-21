@@ -17,6 +17,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from app.decisions.models import Decision
+from app.workspaces.service import write_json_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +61,8 @@ class DecisionStore:
         with self._lock:
             records = self._read_all()
             records.append(json.loads(decision.model_dump_json()))
-            self._store_path.parent.mkdir(parents=True, exist_ok=True)
-            self._store_path.write_text(
-                json.dumps(records, indent=2), encoding="utf-8"
-            )
+            # Atomic: a crash mid-write leaves the previous file intact.
+            write_json_atomically(self._store_path, records)
 
     def list_for_workspace(self, workspace_id: str, limit: int = 10) -> list[Decision]:
         """Most recent first, scoped to one workspace."""

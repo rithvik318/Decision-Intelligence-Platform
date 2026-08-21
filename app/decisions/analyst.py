@@ -107,6 +107,7 @@ class DecisionAnalyst:
             ) from exc
         except Exception as exc:
             raise_if_rate_limited(exc, stage)
+            raise_as_provider_failure(exc, stage)
             raise
         return response.choices[0].message.content or ""
 
@@ -205,6 +206,22 @@ def raise_if_rate_limited(exc: Exception, stage: str) -> None:
         "Wait for the provider quota to reset and retry.",
         retry_after=headers.get("retry-after"),
     ) from exc
+
+
+def raise_as_provider_failure(exc: Exception, stage: str) -> None:
+    """Re-raise a provider-side API failure as the shared analysis error.
+
+    Only `openai.APIError` subclasses are converted, so a genuine bug in our
+    own code still surfaces as a 500 rather than being reported as a provider
+    problem. Rate limits are handled separately by `raise_if_rate_limited`.
+    """
+    from openai import APIError
+
+    if isinstance(exc, APIError):
+        raise DecisionAnalysisError(
+            f"{stage}: the model provider rejected the request "
+            f"({type(exc).__name__}). Check OPENROUTER_API_KEY and the model id."
+        ) from exc
 
 
 def _strip_fences(content: str) -> str:

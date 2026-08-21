@@ -45,7 +45,9 @@ def build_container(
         settings=settings,
         knowledge=knowledge,
         workspaces=WorkspaceRegistry(settings.workspace_store_path),
-        ingestion=IngestionService(knowledge, GitHubLoader(settings)),
+        ingestion=IngestionService(
+            knowledge, GitHubLoader(settings), settings.ingest_root
+        ),
         retriever=retriever,
         agent=WorkspaceAgent(retriever, knowledge, generator),
         decision_agent=DecisionAgent(retriever, knowledge, analyst),

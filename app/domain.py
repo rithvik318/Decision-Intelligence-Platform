@@ -27,13 +27,47 @@ def utcnow() -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
+class IngestedDocument:
+    """What a workspace knows it holds. Recorded at ingest so the corpus can be
+    listed and so a decision can be dated against the knowledge behind it."""
+
+    file_name: str
+    source: str = "manual"
+    document_type: str = "text"
+    location: str | None = None
+    ingested_at: datetime = field(default_factory=utcnow)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "file_name": self.file_name,
+            "source": self.source,
+            "document_type": self.document_type,
+            "location": self.location,
+            "ingested_at": self.ingested_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> IngestedDocument:
+        return cls(
+            file_name=data["file_name"],
+            source=data.get("source", "manual"),
+            document_type=data.get("document_type", "text"),
+            location=data.get("location"),
+            ingested_at=datetime.fromisoformat(data["ingested_at"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Workspace:
-    """An information/decision domain. Deliberately minimal for V1."""
+    """An information/decision domain, plus the state a UI needs to describe it."""
 
     workspace_id: str
     name: str
     description: str = ""
     created_at: datetime = field(default_factory=utcnow)
+    documents: tuple[IngestedDocument, ...] = ()
+    graph_built: bool = False
+    knowledge_updated_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,15 +75,28 @@ class Workspace:
             "name": self.name,
             "description": self.description,
             "created_at": self.created_at.isoformat(),
+            "documents": [d.to_dict() for d in self.documents],
+            "graph_built": self.graph_built,
+            "knowledge_updated_at": (
+                self.knowledge_updated_at.isoformat()
+                if self.knowledge_updated_at
+                else None
+            ),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Workspace:
+        updated = data.get("knowledge_updated_at")
         return cls(
             workspace_id=data["workspace_id"],
             name=data["name"],
             description=data.get("description", ""),
             created_at=datetime.fromisoformat(data["created_at"]),
+            documents=tuple(
+                IngestedDocument.from_dict(d) for d in data.get("documents", [])
+            ),
+            graph_built=bool(data.get("graph_built", False)),
+            knowledge_updated_at=datetime.fromisoformat(updated) if updated else None,
         )
 
 
@@ -87,6 +134,9 @@ class IngestResult:
     documents_ingested: int
     dataset: str
     graph_built: bool = False
+    # What was ingested. Populated by IngestionService, which is the only layer
+    # that sees documents loaded from paths or GitHub as well as inline ones.
+    documents: tuple[SourceDocument, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

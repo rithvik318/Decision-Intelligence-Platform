@@ -1,0 +1,13 @@
+.git/
+.venv/
+.venv313/
+.env
+.decision_intelligence/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+web/node_modules/
+web/dist/
+tests/
