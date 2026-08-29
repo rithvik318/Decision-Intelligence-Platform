@@ -873,6 +873,38 @@ boundary**, not a complete authentication/security boundary.
 Without authentication, users who can reach the API are not prevented
 from accessing workspace IDs they know.
 
+## Vercel deployment
+
+This repository includes Vercel configuration to deploy:
+
+- the Vite frontend from `web/dist`
+- the FastAPI backend as a Python serverless function at `/api`
+
+Deploy steps:
+
+1.  Import the repository into Vercel.
+2.  Set Runtime Environment Variables in the Vercel project:
+
+    -   `OPENROUTER_API_KEY` (or `OPENAI_API_KEY`)
+    -   `OPENROUTER_MODEL` or `OPENAI_MODEL` (optional override)
+    -   `EDI_DATA_DIR=/tmp/.decision_intelligence`
+    -   `INGEST_ROOT=/tmp`
+    -   `CORS_ALLOW_ORIGINS=https://<your-vercel-domain>`
+
+3.  Deploy.
+
+Once deployed:
+
+-   frontend routes are served from Vercel static hosting
+-   API requests to `/workspaces/*` and `/health` are rewritten to the backend function
+
+Important limitation:
+
+Vercel's serverless filesystem is ephemeral. This project stores
+workspace metadata and Cognee data on local disk, so deployed data is
+not durable across cold starts/redeployments unless you replace local
+storage with a persistent external store.
+
 ------------------------------------------------------------------------
 
 # 21. Testing
